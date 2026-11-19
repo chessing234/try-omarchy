@@ -68,6 +68,8 @@ when HEAD is already tagged. A commit with a release tag cannot be given a
 second release version through this command, which keeps app version stamping
 unambiguous.
 
+The DMG appears at its output path only after conversion and any requested signing and notarization succeed. Failed attempts remove their temporary image, and packaging never replaces an existing output.
+
 `make package` remains available for an already-tagged clean checkout. It
 neither prompts nor creates a tag.
 

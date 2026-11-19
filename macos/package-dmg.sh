@@ -48,7 +48,7 @@ output=${2:-"${app%.app}.dmg"}
 [[ $output == /* && $output == *.dmg ]] || fail "OUTPUT_DMG must be an absolute .dmg path"
 [[ ! -e $output && ! -L $output ]] || fail "output already exists: $output"
 
-for tool in codesign diskutil ditto hdiutil ln mkdir mktemp osascript rm sync; do
+for tool in codesign diskutil ditto hdiutil ln mkdir mktemp osascript python3 rm sync; do
   command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"
 done
 codesign --verify --deep --strict --verbose=2 "$app"
@@ -60,6 +60,7 @@ layout_source="$native_dir/dmg-layout.applescript"
 }
 
 work_dir=$(mktemp -d /private/tmp/omarchy-dmg.XXXXXX)
+publish_dir=
 mounted=0
 working_volume_name="Try Omarchy ${work_dir##*/}"
 mount_dir="$work_dir/$working_volume_name"
@@ -69,15 +70,21 @@ cleanup() {
   if (( mounted )); then
     hdiutil detach "$mount_dir" -force >/dev/null 2>&1 || true
   fi
+  [[ -z $publish_dir ]] || rm -rf -- "$publish_dir"
   rm -rf -- "$work_dir"
   exit "$status"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ -n $notarize_profile ]]; then
   command -v xcrun >/dev/null 2>&1 || fail "xcrun is required for notarization"
 fi
 
+publish_dir=$(mktemp -d "${output%/*}/.omarchy-dmg.XXXXXX")
+packaged_dmg="$publish_dir/${output##*/}"
 staging="$work_dir/dmg"
 mkdir -p "$staging"
 ditto "$app" "$staging/${app##*/}"
@@ -112,23 +119,39 @@ hdiutil convert \
   "$read_write_dmg" \
   -format UDZO \
   -imagekey zlib-level=9 \
-  -o "$output" >/dev/null
+  -o "$packaged_dmg" >/dev/null
 
 if [[ -n $sign_identity ]]; then
   codesign \
     --sign "$sign_identity" \
     --identifier dev.tryomarchy.native.disk-image \
     --timestamp \
-    "$output"
-  codesign --verify --strict --verbose=2 "$output"
+    "$packaged_dmg"
+  codesign --verify --strict --verbose=2 "$packaged_dmg"
 fi
 
 if [[ -n $notarize_profile ]]; then
-  xcrun notarytool submit "$output" --keychain-profile "$notarize_profile" --wait
+  xcrun notarytool submit "$packaged_dmg" --keychain-profile "$notarize_profile" --wait
   xcrun stapler staple "$app"
   xcrun stapler validate "$app"
-  xcrun stapler staple "$output"
-  xcrun stapler validate "$output"
+  xcrun stapler staple "$packaged_dmg"
+  xcrun stapler validate "$packaged_dmg"
 fi
+
+python3 -I - "$packaged_dmg" "$output" <<'PY'
+import ctypes
+import os
+import sys
+
+source, target = sys.argv[1:]
+RENAME_EXCL = 0x00000004
+renamex_np = ctypes.CDLL(None, use_errno=True).renamex_np
+renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+renamex_np.restype = ctypes.c_int
+if renamex_np(os.fsencode(source), os.fsencode(target), RENAME_EXCL) != 0:
+    error = ctypes.get_errno()
+    print(f"package-dmg: cannot publish {target}: {os.strerror(error)}", file=sys.stderr)
+    raise SystemExit(1)
+PY
 
 echo "[native] Packaged $output"
